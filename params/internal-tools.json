@@ -1,0 +1,7 @@
+{
+  "ENV": "staging",
+  "SKIP_TESTS": true,
+  "ROLLBACK": false,
+  "DEPLOY_STRATEGY": "recreate",
+  "NOTIFY_CHANNEL": "#deploys-internal"
+}
