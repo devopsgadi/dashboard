@@ -79,4 +79,102 @@ converted to dotted lowercase), marked DRAFT for review.
 - Single file, Python 3.9+, only pyyaml and openpyxl.
 - Print a short console summary (apps per env, keys per class, errors).
 - Include a test with sample ConfigMaps for 3 apps x 3 envs proving
-  global, env-common, secret and app classification.
+  global, env-common, secret and app classification.]
+
+
+
+You are a senior platform engineer. Design and scaffold a centralized,
+layered configuration system for ~500 Spring Boot microservices on
+Kubernetes, deployable to both AKS and on-prem clusters, with or
+without Argo CD.
+
+## Current state
+- Each app keeps properties in its own ConfigMap or Helm values.yaml.
+- Common endpoints (Data API, G-Connex, cluster-level service URLs)
+  are duplicated across all apps and differ per environment.
+- Environments: IT, UAT, PREPROD, EN, EMP, PROD. Each has its own
+  common values.
+- Clusters: AKS + on-prem, split PCI / non-PCI, managed via Rancher.
+- CI: GitLab CI. CD: moving to Argo CD.
+- Secrets: Azure Key Vault (AKS), HashiCorp Vault (on-prem).
+
+## Repo layout (gitops-config/)
+global/values.yaml             # identical everywhere
+platform/aks.yaml              # AKS-only (workload identity, secret store)
+platform/onprem.yaml           # on-prem-only
+env/<env>/common.yaml          # per-env endpoints + common props
+env/<env>/pci.yaml             # optional PCI overrides
+apps/<app>/values.yaml         # app defaults
+apps/<app>/values-<env>.yaml   # app per-env overrides
+clusters.yaml                  # cluster -> env, zone, platform
+
+Merge order (later wins):
+global -> platform -> env -> env-zone -> app -> app-env.
+Use nested YAML only (no dotted keys) so Helm deep-merge works.
+Endpoints live only in env/; apps never redefine them.
+
+## Chart requirements (Helm library chart `spring-app`)
+- Render merged `.Values.springConfig` into a ConfigMap key
+  application.yaml, mounted at /config (no subPath).
+- Apps load it via SPRING_CONFIG_IMPORT=optional:file:/config/application.yaml.
+  No application code changes.
+- ConfigMap name carries a content-hash suffix (immutable, versioned)
+  so each ReplicaSet references the exact config it ran with.
+- Checksum annotation on the pod template so any config change
+  triggers a rolling restart of only the affected app.
+- ExternalSecret pointing at a ClusterSecretStore named
+  `platform-secrets` (Key Vault + Workload Identity on AKS,
+  Vault + Kubernetes auth on-prem). Chart must not branch on platform.
+- PodDisruptionBudget, readiness/liveness probes, values.schema.json.
+
+## Deliverables
+1. Full repo skeleton with all 6 envs, both platforms, and 2 sample
+   apps showing every layer and the final merged result per env.
+2. The `spring-app` library chart.
+3. Option A - Argo CD:
+   - One Argo CD instance per zone (PCI, non-PCI).
+   - AppProjects per zone.
+   - ApplicationSet: matrix generator (clusters by labels env/zone/
+     platform x git directories apps/*), multi-source (chart repo +
+     config repo via `ref: values`), ignoreMissingValueFiles: true,
+     RollingSync strategy for staged rollout.
+   - Auto-sync for IT/UAT; sync windows or manual sync for
+     PREPROD/EN/EMP/PROD.
+   - Optional per-env Git tag pinning (targetRevision) for promotion.
+4. Option B - No Argo, GitLab CI push:
+   - GitLab agent (agentk) per cluster, outbound only.
+   - Pipeline reads clusters.yaml and runs helm upgrade --install with
+     the 6 layered -f files per cluster.
+   - GitLab environments with manual gates for PREPROD and above.
+5. Option C - Flux via AKS GitOps extension + Azure Arc for on-prem:
+   HelmRelease with valuesFrom covering the same layers.
+6. Option D - Runtime config (optional add-on): Azure App
+   Configuration with the Kubernetes Provider, and an alternative
+   Spring Cloud Config Server for on-prem. Explain when it's worth it.
+7. GitLab CI for the config repo (all options): on MR, detect changed
+   apps/envs, helm template, validate with kubeconform +
+   values.schema.json, post rendered ConfigMap diff as MR comment.
+8. CODEOWNERS requiring approval on env/{preprod,en,emp,prod}/** and
+   platform/**.
+9. Python migration script: read existing ConfigMaps/values (read-only
+   kubectl get or files), find keys duplicated across apps per env,
+   classify into global / env-common / app / secret, generate the
+   layered files, and report suspected secrets.
+10. Python validation script: render each app/env and diff against the
+    live ConfigMap (read-only).
+11. README covering: architecture, merge order, adding an app,
+    changing an endpoint, blast radius table (what restarts for each
+    kind of change), promotion flow, rollback (git revert / tag move;
+    why not Argo history rollback or kubectl rollout undo alone),
+    secrets, and a batch migration plan.
+
+## Constraints
+- Cluster access is read-only: scripts use only get/list; never apply,
+  delete, or exec.
+- No hardcoded IPs; use DNS or ExternalName services.
+- PCI and non-PCI config strictly separated.
+- Same repo and chart must work unchanged across options A-C.
+- Prefer simple, readable YAML over clever templating.
+
+Start by proposing the file tree, then generate one component at a
+time, and flag every assumption.
