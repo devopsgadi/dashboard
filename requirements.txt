@@ -2,3 +2,81 @@ streamlit>=1.50
 pandas>=2.0
 requests>=2.31
 openpyxl>=3.1
+
+You are a senior platform engineer. Build a read-only Python tool that
+analyzes Spring Boot configuration across ~500 apps and 6 environments,
+finds common values, and produces an Excel report that drives migration
+to a centralized gitops-config repo.
+
+## Context
+- Config lives today in per-app Kubernetes ConfigMaps and Helm
+  values.yaml / values-<env>.yaml files, spread across many GitLab repos.
+- ConfigMap data entries can be: an embedded application.properties,
+  an embedded application.yml, or plain env-var style keys
+  (e.g. GCONNEX_URL).
+- Environments: IT, UAT, PREPROD, EN, EMP, PROD. Clusters: AKS + on-prem,
+  PCI and non-PCI.
+- Target repo layout:
+  global/values.yaml, env/<env>/common.yaml, apps/<app>/values.yaml,
+  apps/<app>/values-<env>.yaml. Secrets go to Key Vault / Vault, never Git.
+
+## Inputs
+1. A folder (--src) containing cloned repos and/or ConfigMap dumps from
+   `kubectl get cm -n <ns> -o yaml` (including kind: List).
+2. Detect env from path segments or filename tokens (values-uat.yaml),
+   or from a --path-pattern regex with named groups env and app.
+3. Detect app from ConfigMap labels (app.kubernetes.io/name, app) or
+   metadata.name minus -config/-configmap suffix; else directory name.
+4. Optional --values-path to read only a subtree of Helm values
+   (e.g. configmap.data, env). Handle env: [{name, value}] lists.
+5. Skip system ConfigMaps (kube-root-ca.crt, istio-ca-root-cert),
+   templates/, charts/, Chart.yaml.
+
+## Normalization
+- Flatten nested YAML to dotted keys; lists as [i].
+- Parse .properties correctly (comments, line continuations, : or =).
+- Apply Spring relaxed binding so SPRING_DATASOURCE_URL,
+  spring.datasource-url and spring.datasource.url are the same key.
+- Keep every original spelling and the source file for traceability.
+
+## Classification (per env, per key)
+- secret: key or value looks like a credential (password, secret, token,
+  api key, client secret, keystore pass, connection string with
+  password=, JWT, PEM). Never print the value; show a sha256 prefix so
+  equal secrets can still be compared.
+- env-common: key present in >= --min-apps apps (default 3) and
+  >= --min-coverage of apps in that env (default 30%), with the same value
+  in >= --min-agreement of them (default 90%).
+- global: env-common in every env with the identical value everywhere.
+- review-divergent: common key but values disagree; list each value and
+  which apps use it.
+- app: everything else.
+- Flag values that are URLs, hostnames, or hardcoded IPs.
+
+## Excel output (openpyxl, Arial, frozen headers, filters, color by class)
+1. Summary: per env - app count, key count, counts per class, the rules
+   and thresholds used, a color legend.
+2. Move to repo: global + env-common keys with value, coverage,
+   agreement, kind, target file, and empty Decision / Owner / Notes
+   columns. Note "IP hardcoded - use DNS" where relevant.
+3. Review divergent: env, key, each distinct value, app count, app list.
+4. Secrets: env, key, app count, distinct value count, masked hash,
+   apps, empty Vault path / Migrated columns.
+5. Env matrix: one row per common key, one column per env, showing the
+   value and "[+N other]" when apps disagree.
+6. App specific: app, env, key, value, source.
+7. Raw: full inventory with normalized key and class.
+8. Parse errors: file and error, if any.
+
+## Optional output
+--emit-yaml DIR writes draft global/values.yaml and
+env/<env>/common.yaml as nested YAML under springConfig (env-var keys
+converted to dotted lowercase), marked DRAFT for review.
+
+## Constraints
+- Read-only: no kubectl apply/delete/exec, no writes to source repos.
+- Never write secret values to Excel, YAML, or stdout.
+- Single file, Python 3.9+, only pyyaml and openpyxl.
+- Print a short console summary (apps per env, keys per class, errors).
+- Include a test with sample ConfigMaps for 3 apps x 3 envs proving
+  global, env-common, secret and app classification.
